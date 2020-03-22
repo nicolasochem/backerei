@@ -68,8 +68,8 @@ payout (Config baker host port from fromName varyingFee databasePath accountData
           estimatedRewards <- Delegation.estimatedRewards conf cycleLength cycle baker
           ((bakerBondReward, bakerFeeReward, bakerLooseReward, bakerTotalReward), calculated, stakingBalance) <- Delegation.calculateRewardsFor conf cycleLength snapshotInterval cycle baker estimatedRewards fee
           let bakerRewards = BakerRewards bakerBondReward bakerFeeReward bakerLooseReward bakerTotalReward
-              delegators = M.fromList $ fmap (\(addr, balance, payout) -> (addr, DelegatorPayout balance payout Nothing Nothing)) calculated
-              cyclePayout = CyclePayout stakingBalance fee estimatedRewards bakerRewards [] Nothing Nothing delegators
+              delegators = M.fromList $ fmap (\(addr, balance, estimatedRewards) -> (addr, DelegatorPayout balance estimatedRewards Nothing Nothing Nothing Nothing Nothing Nothing)) calculated
+              cyclePayout = CyclePayout stakingBalance fee estimatedRewards bakerRewards [] Nothing Nothing Nothing Nothing delegators
           return (db { dbPayoutsByCycle = M.insert cycle cyclePayout payouts }, True)
       maybeUpdateEstimates db = do
         currentLevel <- RPC.currentLevel conf RPC.head
@@ -111,9 +111,10 @@ payout (Config baker host port from fromName varyingFee databasePath accountData
               ((bakerBondReward, bakerFeeReward, bakerLooseReward, bakerTotalReward), calculated, _) <- Delegation.calculateRewardsFor conf cycleLength snapshotInterval cycle baker paidRewards fee
               let bakerRewards = BakerRewards bakerBondReward bakerFeeReward bakerLooseReward bakerTotalReward
                   estimatedDelegators = cycleDelegators cyclePayout
-                  delegators = M.fromList $ fmap (\(addr, balance, payout) -> (addr, DelegatorPayout balance (delegatorEstimatedRewards $ estimatedDelegators M.! addr) (Just payout) (delegatorPayoutOperationHash $ estimatedDelegators M.! addr))) calculated
+                  delegators = M.fromList $ fmap (\(addr, balance, finalRewards) -> (addr, DelegatorPayout balance (delegatorEstimatedRewards $ estimatedDelegators M.! addr) (Just finalRewards) (Just ((delegatorEstimatedRewards $ estimatedDelegators M.! addr ) P.- finalRewards)) (delegatorPayoutOperationHash $ estimatedDelegators M.! addr) Nothing Nothing (if payEstimatedRewards then Nothing else Just finalRewards ))) calculated
               return (db { dbPayoutsByCycle = M.insert cycle (cyclePayout { cycleStolenBlocks = stolenBlocks, cycleFinalTotalRewards = Just finalTotalRewards,
                 cycleFinalBakerRewards = Just bakerRewards, cycleDelegators = delegators }) payouts }, True)
+
       maybeUpdateActual db = do
         currentLevel <- RPC.currentLevel conf RPC.head
         let currentCycle = RPC.levelCycle currentLevel
@@ -121,20 +122,60 @@ payout (Config baker host port from fromName varyingFee databasePath accountData
         (res, updated) <- foldFirst db (fmap maybeUpdateActualForCycle [startingCycle .. knownCycle])
         return (res, (updated, return ()))
 
+      maybeUpdateDebtForCycle cycle db = do
+        if payEstimatedRewards then do
+          let payouts = dbPayoutsByCycle db
+              finalizedCycle = cycle + payoutDelay + 5
+          case M.lookup finalizedCycle payouts of
+            Nothing -> return (db, False)
+            Just finalizedCyclePayout -> do
+              let finalizedCycleDelegators = cycleDelegators finalizedCyclePayout
+              case M.lookup cycle payouts of
+                Nothing -> error "should not happen: missed lookup"
+                Just cyclePayout -> do
+                  if isJust (cyclePayoutWithheldDebt cyclePayout) then
+                    return (db, False)
+                  else do
+                    T.putStrLn $ T.concat ["Updating DB with debt withholding amounts for cycle ", T.pack $ P.show cycle, "..."]
+                    let currentCycleDelegators = cycleDelegators cyclePayout
+                        cycleDelegatorsWithDebt = fmap (\(addr, delegator) -> (addr,  if (M.member addr finalizedCycleDelegators) then delegator { delegatorPayoutWithheldDebt = (delegatorEstimatedDifference $ finalizedCycleDelegators M.! addr), delegatorWithheldDebtForCycle = Just finalizedCycle, delegatorPayoutAmount = Just ( max 0 ( ( delegatorEstimatedRewards $ currentCycleDelegators M.! addr ) P.- fromJust ( delegatorEstimatedDifference $ finalizedCycleDelegators M.! addr ) ) ) } else delegator { delegatorPayoutAmount = Just ( delegatorEstimatedRewards $ currentCycleDelegators M.! addr ) } )) $ M.toList currentCycleDelegators
+                    let cyclePayoutAmount = P.sum $ fmap (\(_, delegator) -> fromJust $ delegatorPayoutAmount delegator ) cycleDelegatorsWithDebt
+                        cyclePayoutWithheldDebt = P.sum $ fmap (\(_, delegator) -> fromMaybe 0 ( delegatorPayoutWithheldDebt delegator ) ) cycleDelegatorsWithDebt
+                        cyclePayoutWithDebt = M.fromList [ ( cycle, cyclePayout { cycleDelegators = M.fromList cycleDelegatorsWithDebt, cyclePayoutAmount = Just cyclePayoutAmount, cyclePayoutWithheldDebt = Just cyclePayoutWithheldDebt } ) ]
+                    return ( db { dbPayoutsByCycle = M.union cyclePayoutWithDebt payouts }, True)
+        else return (db, False)
+
+      maybeUpdateDebt db = do
+        currentLevel <- RPC.currentLevel conf RPC.head
+        let currentCycle = RPC.levelCycle currentLevel
+            knownCycle   = currentCycle + preservedCycles
+        (res, updated) <- foldFirst db (fmap maybeUpdateDebtForCycle [startingCycle .. knownCycle])
+        return (res, (updated, return ()))
+
+
       maybePayoutDelegatorsForCycle cycle delegators db = do
-        let needToPay' = if payEstimatedRewards then P.filter (\(_, delegator) -> case (delegatorPayoutOperationHash delegator, delegatorEstimatedRewards delegator) of (Nothing, amount) | amount > 0 -> True; _ -> False) $ M.toList delegators else P.filter (\(_, delegator) -> case (delegatorPayoutOperationHash delegator, delegatorFinalRewards delegator) of (Nothing, Just amount) | amount > 0 -> True; _ -> False) $ M.toList delegators
+        needToPay' <- if payEstimatedRewards then do
+          let delegatorsToPay = P.filter (\(_, delegator) -> case (delegatorPayoutOperationHash delegator, delegatorEstimatedRewards delegator) of (Nothing, amount) | amount > 0 -> True; _ -> False) $ M.toList delegators
+          return delegatorsToPay
+        else do
+          let delegatorsToPay = P.filter (\(_, delegator) -> case (delegatorPayoutOperationHash delegator, delegatorFinalRewards delegator) of (Nothing, Just amount) | amount > 0 -> True; _ -> False) $ M.toList delegators
+          return delegatorsToPay
         needToPay <- (P.map (\(a, b, _) -> (a, b)) . P.filter (\(_, _, r) -> r)) `fmap` P.mapM (\(d, a) -> 
           if T.take 2 d == "KT" then pure (d, a, True) else RPC.managerKey conf RPC.head d >>= \r -> pure (d, a, r /= Nothing)) needToPay'
         let toPay     = P.take 100 needToPay
         if null toPay then return (db, (False, return ())) else do
           forM_ toPay $ \(address, delegator) -> do
-            if payEstimatedRewards then
-              T.putStrLn $ T.concat ["For cycle ", T.pack $ P.show cycle, " delegator ", address, " should be paid estimated rewards of ", T.pack $ P.show $ delegatorEstimatedRewards delegator, " XTZ"]
+            if payEstimatedRewards then do
+              if isJust (delegatorWithheldDebtForCycle delegator) then do
+                T.putStrLn $ T.concat ["For cycle ", T.pack $ P.show cycle, " delegator ", address, " has estimated rewards of ", T.pack $ P.show $ delegatorEstimatedRewards delegator, " XTZ"]
+                T.putStrLn $ T.concat ["Delegator ", address, " has been overpaid ", T.pack $ P.show $ fromJust $ delegatorPayoutWithheldDebt delegator, " XTZ on cycle ", T.pack $ P.show $ fromJust $ delegatorWithheldDebtForCycle delegator, ", total payout after withholding : ", T.pack $ P.show $ fromJust $ delegatorPayoutAmount delegator, " XTZ"]
+              else do
+                T.putStrLn $ T.concat ["For cycle ", T.pack $ P.show cycle, " delegator ", address, " should be paid estimated rewards of ", T.pack $ P.show $ delegatorEstimatedRewards delegator, " XTZ"]
             else
               T.putStrLn $ T.concat ["For cycle ", T.pack $ P.show cycle, " delegator ", address, " should be paid final rewards of ", T.pack $ P.show $ fromJust (delegatorFinalRewards delegator), " XTZ"]
           (updatedDelegators, action) <-
             if noDryRun then do
-              let dests = if payEstimatedRewards then fmap (\(address, delegator) -> (address, delegatorEstimatedRewards delegator)) toPay else fmap (\(address, delegator) -> (address, let Just amount = delegatorFinalRewards delegator in amount)) toPay
+              let dests = (fmap (\(address, delegator) -> (address, let Just amount = delegatorPayoutAmount delegator in amount)) toPay)
               hash <- RPC.sendTezzies conf from fromName dests (sign clientPath clientConfigFile fromPassword)
               threadDelay 600000000
               if length toPay == length needToPay then do
@@ -153,9 +194,9 @@ payout (Config baker host port from fromName varyingFee databasePath accountData
             let total = if payEstimatedRewards then P.sum $ fmap delegatorEstimatedRewards $ P.filter (isNothing . delegatorPayoutOperationHash) $ M.elems delegators else P.sum $ fmap (fromJust . delegatorFinalRewards) $ P.filter (isJust . delegatorFinalRewards) $ P.filter (isNothing . delegatorPayoutOperationHash) $ M.elems delegators
             if total == 0 then return (db, (False, return ())) else do
               balance <- RPC.balanceAt conf RPC.head from
-              T.putStrLn $ T.concat ["Total payouts: ", T.pack $ P.show total, ", payout account balance: ", T.pack $ P.show balance]
+              T.putStrLn $ T.concat ["Total payouts for cycle ", T.pack $ P.show cycle, " : ", T.pack $ P.show total, ", payout account balance: ", T.pack $ P.show balance]
               if balance < total then do
-                T.putStrLn "Balance less than total required to pay cycle, aborting"
+                T.putStrLn $ T.concat ["Balance less than total required to pay cycle ", T.pack $ P.show cycle, ", aborting" ]
                 return (db, (False, return ()))
               else maybePayoutDelegatorsForCycle cycle delegators db
       maybePayout db = do
@@ -288,7 +329,7 @@ payout (Config baker host port from fromName varyingFee databasePath accountData
             T.putStrLn $ T.concat ["Creating new DB in file ", databasePath, "..."]
             step databasePath (Just $ DB M.empty)
           Just prev -> do
-            foldFirst3 prev [maybeUpdateEstimates, maybeUpdateActual, maybePayout]
+            foldFirst3 prev [maybeUpdateEstimates, maybeUpdateActual, maybeUpdateDebt, maybePayout]
 
       loop = withDBLoop (T.unpack databasePath) (step databasePath)
 

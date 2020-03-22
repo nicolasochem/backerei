@@ -124,7 +124,14 @@ You cannot set a payout delay of less than negative `PRESERVED_CYCLES` because f
 rewards can not be computed before the cycle ends. However, you may set up a payout delay
 of up to `2*PRESERVED_CYCLES + 1` if you use the `--pay-estimated-rewards` option.
 
-This option will likely pay more than the final fee, so adjust your fee accordingly.
+With the `--pay-estimated-rewards` option, backerei will pay upfront the idealized rewards
+for a future cycle. However, once the cycle actually runs, it will attempt to collect
+its debt in case the actual rewards are lower. When a payout is sent out for a later cycle,
+the debt for the just-finished cycle is withheld.
+
+When a delegator stops delegating, it will walk away with some additional rewards. But
+in the case of an address that keeps delegating with a constant amount, the debt is
+eventually always recouped.
 
 #### Verifying payouts
 

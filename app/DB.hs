@@ -113,6 +113,8 @@ data CyclePayout = CyclePayout {
   cycleStolenBlocks          :: [StolenBlock],
   cycleFinalTotalRewards     :: Maybe CycleRewards,
   cycleFinalBakerRewards     :: Maybe BakerRewards,
+  cyclePayoutAmount          :: Maybe Tezzies,
+  cyclePayoutWithheldDebt    :: Maybe Tezzies,
   cycleDelegators            :: M.Map T.Text DelegatorPayout
 } deriving (Generic, Show)
 
@@ -139,10 +141,14 @@ data BakerRewards = BakerRewards {
 } deriving (Generic, Show)
 
 data DelegatorPayout = DelegatorPayout {
-  delegatorBalance             :: Tezzies,
-  delegatorEstimatedRewards    :: Tezzies,
-  delegatorFinalRewards        :: Maybe Tezzies,
-  delegatorPayoutOperationHash :: Maybe T.Text
+  delegatorBalance              :: Tezzies,
+  delegatorEstimatedRewards     :: Tezzies,
+  delegatorFinalRewards         :: Maybe Tezzies,
+  delegatorEstimatedDifference  :: Maybe Tezzies,
+  delegatorPayoutOperationHash  :: Maybe T.Text,
+  delegatorPayoutWithheldDebt   :: Maybe Tezzies,
+  delegatorWithheldDebtForCycle :: Maybe Int,
+  delegatorPayoutAmount         :: Maybe Tezzies
 } deriving (Generic, Show)
 
 instance A.FromJSON DB where
