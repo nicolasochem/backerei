@@ -157,12 +157,7 @@ payout (Config baker host port from fromName varyingFee databasePath accountData
 
 
       maybePayoutDelegatorsForCycle cycle delegators db = do
-        needToPay' <- if payEstimatedRewards then do
-          let delegatorsToPay = P.filter (\(_, delegator) -> case (delegatorPayoutOperationHash delegator, delegatorEstimatedRewards delegator) of (Nothing, amount) | amount > 0 -> True; _ -> False) $ M.toList delegators
-          return delegatorsToPay
-        else do
-          let delegatorsToPay = P.filter (\(_, delegator) -> case (delegatorPayoutOperationHash delegator, delegatorFinalRewards delegator) of (Nothing, Just amount) | amount > 0 -> True; _ -> False) $ M.toList delegators
-          return delegatorsToPay
+        let needToPay' = P.filter (\(_, delegator) -> case (delegatorPayoutOperationHash delegator, delegatorPayoutAmount delegator) of (Nothing, Just amount) | amount > 0 -> True; _ -> False) $ M.toList delegators
         needToPay <- (P.map (\(a, b, _) -> (a, b)) . P.filter (\(_, _, r) -> r)) `fmap` P.mapM (\(d, a) -> 
           if T.take 2 d == "KT" then pure (d, a, True) else RPC.managerKey conf RPC.head d >>= \r -> pure (d, a, r /= Nothing)) needToPay'
         let toPay     = P.take 100 needToPay
