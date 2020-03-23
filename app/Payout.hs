@@ -126,24 +126,27 @@ payout (Config baker host port from fromName varyingFee databasePath accountData
         if payEstimatedRewards then do
           let payouts = dbPayoutsByCycle db
               finalizedCycle = cycle + payoutDelay + 5
-          case M.lookup finalizedCycle payouts of
-            Nothing -> return (db, False)
-            Just finalizedCyclePayout -> do
-              let finalizedCycleDelegators = cycleDelegators finalizedCyclePayout
-              case M.lookup cycle payouts of
-                Nothing -> error "should not happen: missed lookup"
-                Just cyclePayout -> do
-                  if isJust (cyclePayoutWithheldDebt cyclePayout) then
-                    return (db, False)
-                  else do
-                    T.putStrLn $ T.concat ["Updating DB with debt withholding amounts for cycle ", T.pack $ P.show cycle, "..."]
-                    let currentCycleDelegators = cycleDelegators cyclePayout
-                        cycleDelegatorsWithDebt = fmap (\(addr, delegator) -> (addr,  if (M.member addr finalizedCycleDelegators) then delegator { delegatorPayoutWithheldDebt = (delegatorEstimatedDifference $ finalizedCycleDelegators M.! addr), delegatorWithheldDebtForCycle = Just finalizedCycle, delegatorPayoutAmount = Just ( max 0 ( ( delegatorEstimatedRewards $ currentCycleDelegators M.! addr ) P.- fromJust ( delegatorEstimatedDifference $ finalizedCycleDelegators M.! addr ) ) ) } else delegator { delegatorPayoutAmount = Just ( delegatorEstimatedRewards $ currentCycleDelegators M.! addr ) } )) $ M.toList currentCycleDelegators
-                    let cyclePayoutAmount = P.sum $ fmap (\(_, delegator) -> fromJust $ delegatorPayoutAmount delegator ) cycleDelegatorsWithDebt
-                        cyclePayoutWithheldDebt = P.sum $ fmap (\(_, delegator) -> fromMaybe 0 ( delegatorPayoutWithheldDebt delegator ) ) cycleDelegatorsWithDebt
-                        cyclePayoutWithDebt = M.fromList [ ( cycle, cyclePayout { cycleDelegators = M.fromList cycleDelegatorsWithDebt, cyclePayoutAmount = Just cyclePayoutAmount, cyclePayoutWithheldDebt = Just cyclePayoutWithheldDebt } ) ]
-                    return ( db { dbPayoutsByCycle = M.union cyclePayoutWithDebt payouts }, True)
-        else return (db, False)
+          if finalizedCycle < startingCycle then do
+            return (db, False)
+          else do
+            case M.lookup finalizedCycle payouts of
+              Nothing -> return (db, False)
+              Just finalizedCyclePayout -> do
+                let finalizedCycleDelegators = cycleDelegators finalizedCyclePayout
+                case M.lookup cycle payouts of
+                  Nothing -> error "should not happen: missed lookup"
+                  Just cyclePayout -> do
+                    if isJust (cyclePayoutWithheldDebt cyclePayout) then
+                      return (db, False)
+                    else do
+                      T.putStrLn $ T.concat ["Updating DB with debt withholding amounts for cycle ", T.pack $ P.show cycle, "..."]
+                      let currentCycleDelegators = cycleDelegators cyclePayout
+                          cycleDelegatorsWithDebt = fmap (\(addr, delegator) -> (addr,  if (M.member addr finalizedCycleDelegators) then delegator { delegatorPayoutWithheldDebt = (delegatorEstimatedDifference $ finalizedCycleDelegators M.! addr), delegatorWithheldDebtForCycle = Just finalizedCycle, delegatorPayoutAmount = Just ( max 0 ( ( delegatorEstimatedRewards $ currentCycleDelegators M.! addr ) P.- fromJust ( delegatorEstimatedDifference $ finalizedCycleDelegators M.! addr ) ) ) } else delegator { delegatorPayoutAmount = Just ( delegatorEstimatedRewards $ currentCycleDelegators M.! addr ) } )) $ M.toList currentCycleDelegators
+                      let cyclePayoutAmount = P.sum $ fmap (\(_, delegator) -> fromJust $ delegatorPayoutAmount delegator ) cycleDelegatorsWithDebt
+                          cyclePayoutWithheldDebt = P.sum $ fmap (\(_, delegator) -> fromMaybe 0 ( delegatorPayoutWithheldDebt delegator ) ) cycleDelegatorsWithDebt
+                          cyclePayoutWithDebt = M.fromList [ ( cycle, cyclePayout { cycleDelegators = M.fromList cycleDelegatorsWithDebt, cyclePayoutAmount = Just cyclePayoutAmount, cyclePayoutWithheldDebt = Just cyclePayoutWithheldDebt } ) ]
+                      return ( db { dbPayoutsByCycle = M.union cyclePayoutWithDebt payouts }, True)
+          else return (db, False)
 
       maybeUpdateDebt db = do
         currentLevel <- RPC.currentLevel conf RPC.head
