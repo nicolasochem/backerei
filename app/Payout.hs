@@ -194,7 +194,7 @@ payout (Config baker host port from fromName varyingFee databasePath accountData
           Nothing -> error "should not happen: missed lookup"
           Just cyclePayout -> do
             let delegators = cycleDelegators cyclePayout
-            let total = if payEstimatedRewards then P.sum $ fmap delegatorEstimatedRewards $ P.filter (isNothing . delegatorPayoutOperationHash) $ M.elems delegators else P.sum $ fmap (fromJust . delegatorFinalRewards) $ P.filter (isJust . delegatorFinalRewards) $ P.filter (isNothing . delegatorPayoutOperationHash) $ M.elems delegators
+            let total = P.sum $ fmap (fromJust . delegatorPayoutAmount) $ P.filter (isJust . delegatorPayoutAmount) $ P.filter (isNothing . delegatorPayoutOperationHash) $ M.elems delegators
             if total == 0 then return (db, (False, return ())) else do
               balance <- RPC.balanceAt conf RPC.head from
               T.putStrLn $ T.concat ["Total payouts for cycle ", T.pack $ P.show cycle, " : ", T.pack $ P.show total, ", payout account balance: ", T.pack $ P.show balance]
