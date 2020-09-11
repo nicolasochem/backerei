@@ -50,7 +50,7 @@ RUN mkdir /build
 COPY . /build
 RUN cd /build && make build && make install
 
-FROM tezos/tezos:mainnet
+FROM tezos/tezos:latest-release
 COPY --from=stack_intermediate /root/.local/bin/backerei /home/tezos
 WORKDIR /home/tezos
 ENTRYPOINT ["./backerei"]
